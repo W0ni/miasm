@@ -4,7 +4,7 @@ from __future__ import print_function
 from future.builtins import map, range
 
 from miasm.core.utils import decode_hex, encode_hex, int_to_byte
-
+from miasm.jitter.csts import PAGE_READ, PAGE_WRITE
 import socket
 import struct
 import time
@@ -12,7 +12,6 @@ import logging
 from io import BytesIO
 import miasm.analysis.debugging as debugging
 from miasm.jitter.jitload import ExceptionHandle
-
 
 class GdbServer(object):
 
@@ -33,15 +32,15 @@ class GdbServer(object):
     # Communication methods
 
     def compute_checksum(self, data):
-        return encode_hex(int_to_byte(sum(map(ord, data)) % 256))
+        return encode_hex(bytes([sum(bytes(data)) & 0xff]))
 
     def get_messages(self):
         all_data = b""
         while True:
             data = self.sock.recv(4096)
-            if not data:
-                break
             all_data += data
+            if (len(data) > 3) and data[-3] == b'#'[0]:
+                break
 
         logging.debug("<- %r", all_data)
         self.recv_queue += self.parse_messages(all_data)
@@ -50,7 +49,7 @@ class GdbServer(object):
         buf = BytesIO(data)
         msgs = []
 
-        while (buf.tell() < buf.len):
+        while (buf.tell() < len(data)):
             token = buf.read(1)
             if token == b"+":
                 continue
@@ -73,9 +72,10 @@ class GdbServer(object):
         self.send_queue.append(b"O" + encode_hex(s))
 
     def process_messages(self):
-
         while self.recv_queue:
             msg = self.recv_queue.pop(0)
+            logging.debug(msg)
+            print(msg)
             buf = BytesIO(msg)
             msg_type = buf.read(1)
 
@@ -96,9 +96,41 @@ class GdbServer(object):
                 elif msg.startswith(b"qfThreadInfo"):
                     # Not supported
                     self.send_queue.append(b"")
-                else:
-                    raise NotImplementedError()
+                elif msg.startswith(b"qL"):
+                    # Not supported
+                    self.send_queue.append(b"")
+                elif msg.startswith(b"qSymbol::"):
+                    # Not supported
+                    self.send_queue.append(b"OK")
 
+                elif msg.startswith(b"qOffsets"):
+                    # Not supported
+                    self.send_queue.append(b"")
+                elif msg.startswith(b"qRcmd"):
+                    cmd = decode_hex(msg.split(b'qRcmd,', 1)[1].split(b'#', 1)[0])
+                    if cmd == b"info mem":
+                        all_memory = self.dbg.myjit.vm.get_all_memory()
+                        sections = list(all_memory)
+                        result_mappings = b""
+                        for i in range(len(sections)):
+                            addr = sections[i]
+                            access = all_memory[addr]['access']
+                            perms = b""
+                            perms += b"r" if access & PAGE_READ else b"-"
+                            perms += b"w" if access & PAGE_WRITE else b"-"
+                            result_mappings += b"0x%x-0x%x 0x%x -%s\n" % (addr, all_memory[addr]['size'] + addr, addr - sections[0], perms)
+                        print(result_mappings)
+                        self.send_queue.append(encode_hex(result_mappings))
+                    else:
+                        raise NotImplementedError(cmd)
+
+                else:
+                    self.send_queue.append(b"")
+                    logging.error("unknown q packet") 
+            elif msg_type == b'Q':
+                # Not supported
+                self.send_queue.append(b"")
+                logging.error("unknown Q packet")
             elif msg_type == b"H":
                 # Set current thread
                 self.send_queue.append(b"OK")
@@ -143,6 +175,9 @@ class GdbServer(object):
                 if msg == b"vCont?":
                     # Is vCont supported ?
                     self.send_queue.append(b"")
+                else:
+                    print("unkown v packet")
+                    self.send_queue.append(b"")
 
             elif msg_type == b"s":
                 # Step
@@ -158,7 +193,7 @@ class GdbServer(object):
                     addr, size = (int(x, 16) for x in buf.read().split(b",", 1))
 
                     if size != 1:
-                        raise NotImplementedError("Bigger size")
+                        logging.error("Bigger size")
                     self.dbg.add_breakpoint(addr)
                     self.send_queue.append(b"OK")
 
@@ -202,7 +237,7 @@ class GdbServer(object):
                     addr, size = (int(x, 16) for x in buf.read().split(b",", 1))
 
                     if size != 1:
-                        raise NotImplementedError("Bigger size")
+                        logging.error("Bigger size")
                     dbgsoft = self.dbg.get_breakpoint_by_addr(addr)
                     assert(len(dbgsoft) == 1)
                     self.dbg.remove_breakpoint(dbgsoft[0])
@@ -258,7 +293,9 @@ class GdbServer(object):
                     self.send_queue.append(b"S05")
                 else:
                     raise NotImplementedError()
-
+            elif msg_type == b'C':
+                signal = buf.read(2)
+                self.send_queue.append(b"X" + signal)
             else:
                 raise NotImplementedError(
                     "Not implemented: message type %r" % msg_type
@@ -297,6 +334,8 @@ class GdbServer(object):
         return s
 
     def read_register(self, reg_num):
+        if reg_num > len(self.general_registers_order):
+            return b''
         reg_name = self.general_registers_order[reg_num]
         reg_value = self.read_register_by_name(reg_name)
         size = self.general_registers_size[reg_name]
@@ -394,6 +433,79 @@ class GdbServer_x86_32(GdbServer):
         else:
             return sup_func(reg_name)
 
+class GdbServer_x86_64(GdbServer):
+
+    "Extend GdbServer for x86 64bits purposes"
+
+    general_registers_order = [
+        "RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP",
+        "RSP", "R8", "R9", "R10", "R11", "R12", "R13", "R14",
+        "R15", "RIP", "EFLAGS", "CS", "SS", "DS", "ES",
+        "FS", "GS"
+    ]
+
+    general_registers_size = {
+        "RAX": 8,
+        "RCX": 8,
+        "RDX": 8,
+        "RBX": 8,
+        "RSP": 8,
+        "RBP": 8,
+        "RSI": 8,
+        "RDI": 8,
+        "RIP": 8,
+        "R8" : 8,
+        "R9" : 8,
+        "R10" : 8,
+        "R11": 8,
+        "R12" : 8,
+        "R13" : 8,
+        "R14" : 8,
+        "R15" : 8,
+        "EFLAGS": 4,
+        "CS": 4,
+        "SS": 4,
+        "DS": 4,
+        "ES": 4,
+        "FS": 4,
+        "GS": 4
+    }
+
+    register_ignore = [
+        "tf", "i_f", "nt", "rf", "vm", "ac", "vif", "vip", "i_d"
+    ]
+
+    def read_register_by_name(self, reg_name):
+        sup_func = super(GdbServer_x86_64, self).read_register_by_name
+
+        # Assert EIP on pc jitter
+        if reg_name == "RIP":
+            return self.dbg.myjit.pc
+
+        # EFLAGS case
+        if reg_name == "EFLAGS":
+            val = 0
+            eflags_args = [
+                "cf", 1, "pf", 0, "af", 0, "zf", "nf", "tf", "i_f", "df", "of"
+            ]
+            eflags_args += ["nt", 0, "rf", "vm", "ac", "vif", "vip", "i_d"]
+            eflags_args += [0] * 10
+
+            for i, arg in enumerate(eflags_args):
+                if isinstance(arg, str):
+                    if arg not in self.register_ignore:
+                        to_add = sup_func(arg)
+                    else:
+                        to_add = 0
+                else:
+                    to_add = arg
+
+                val |= (to_add << i)
+            return val
+        else:
+            return sup_func(reg_name)
+
+
 
 class GdbServer_msp430(GdbServer):
 
@@ -451,3 +563,50 @@ class GdbServer_msp430(GdbServer):
         else:
             return sup_func(reg_name)
 
+
+class GdbServer_arm(GdbServer):
+
+    "Extend GdbServer for arm purposes"
+
+    general_registers_order = [
+        *["R%d" %i for i in range(13)], "SP", "LR", "PC", "CPSR", *["XXX" for _ in range(41-16)],
+    ]
+
+    general_registers_size = {
+        "PC": 4,
+        "SP": 4,
+        "CPSR": 4,
+        "LR": 4,
+        "R0": 4,
+        "R1": 4,
+        "R2": 4,
+        "R3": 4,
+        "R4": 4,
+        "R5": 4,
+        "R6": 4,
+        "R7": 4,
+        "R8": 4,
+        "R9": 4,
+        "R10":4,
+        "R11": 4,
+        "R12": 4,
+        "XXX": 4
+    }
+
+    def read_register_by_name(self, reg_name):
+        sup_func = super(GdbServer_arm, self).read_register_by_name
+        if reg_name == "CPSR":
+            cpsr = sup_func('nf') << 32
+            cpsr |= sup_func('zf') << 31
+            cpsr |= sup_func('cf') << 30
+            cpsr |= sup_func('of') << 29
+
+            cpsr |= sup_func('ge3') << 19
+            cpsr |= sup_func('ge2') << 18
+            cpsr |= sup_func('ge1') << 17
+            cpsr |= sup_func('ge0') << 16
+            return cpsr
+        elif reg_name == 'XXX':
+            return 0
+        else:
+            return sup_func(reg_name)

@@ -37,6 +37,11 @@ class Machine(object):
                 jitter = jit.jitter_arml
             except ImportError:
                 pass
+            try:
+                from miasm.analysis.gdbserver import GdbServer_arm as gdbserver
+            except ImportError:
+                pass
+ 
             mn = arch.mn_arm
             from miasm.arch.arm.lifter_model_call import LifterModelCallArml as lifter_model_call
             from miasm.arch.arm.sem import Lifter_Arml as lifter
@@ -48,6 +53,11 @@ class Machine(object):
                 jitter = jit.jitter_armb
             except ImportError:
                 pass
+            try:
+                from miasm.analysis.gdbserver import GdbServer_arm as gdbserver
+            except ImportError:
+                pass
+ 
             mn = arch.mn_arm
             from miasm.arch.arm.lifter_model_call import LifterModelCallArmb as lifter_model_call
             from miasm.arch.arm.sem import Lifter_Armb as lifter
@@ -125,6 +135,10 @@ class Machine(object):
             try:
                 from miasm.arch.x86 import jit
                 jitter = jit.jitter_x86_64
+            except ImportError:
+                pass
+            try:
+                from miasm.analysis.gdbserver import GdbServer_x86_64 as gdbserver
             except ImportError:
                 pass
             mn = arch.mn_x86

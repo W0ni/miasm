@@ -143,10 +143,9 @@ class Sandbox(object):
         @addr: address of the target function
         @args: arguments
         """
-        self.jitter.init_run(addr)
         self.jitter.add_breakpoint(self.CALL_FINISH_ADDR, self.code_sentinelle)
         prepare_cb(self.CALL_FINISH_ADDR, *args)
-        self.jitter.continue_run()
+        self.run(addr)
 
 
 
